@@ -1,7 +1,3 @@
-Here’s your updated `README.md` file with your **live demo link** added and ensuring it aligns with the submission guidelines (e.g., code upload instructions, live link, methodologies, sample outputs, etc.).
-
----
-
 # Medical Transcript Analyzer
 
 A Streamlit web application that analyzes medical conversation transcripts to extract structured information, perform sentiment analysis, and generate SOAP notes for physicians.
