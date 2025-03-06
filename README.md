@@ -114,6 +114,23 @@ For processing multiple transcripts at once:
   }
 }
 ```
+## Screenshots
+
+Here are some examples of the application output:
+
+1. **Medical Details Extraction**:
+
+   ![Medical Details Extraction](https://drive.google.com/uc?id=17tatUOWmdbL7afE_AnK01Ye3hBBGIGyL)
+
+2. **Sentiment Analysis**:
+
+   ![Sentiment Analysis](https://drive.google.com/uc?id=1Pins2Qk79wXS8RsgVc6eLfRMCYoenaI9)
+
+3. **SOAP Note Generation**:
+
+   ![SOAP Note Generation](https://drive.google.com/uc?id=1hWFotwhTt1Fb7_CY3PWKE8xWu11yp6Tl)
+
+---
 
 ## Technologies Used
 
@@ -131,3 +148,16 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 Developed by Shiva Sai
 
 GitHub: [shiva-sai-824](https://github.com/shiva-sai-824)
+
+
+
+
+
+
+
+
+
+
+
+
+
