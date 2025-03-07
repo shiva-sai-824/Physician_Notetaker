@@ -78,7 +78,7 @@ def ensure_spacy_model():
     try:
         spacy.load("En_core_web_sm")  # Attempt to load the model
     except OSError:
-        st.warning("SpaCy model 'en_core_web_md' not found. Downloading now...")
+        # st.warning("SpaCy model 'en_core_web_md' not found. Downloading now...")
         os.system("python -m spacy download en_core_web_md")  # Install the model
 
 
