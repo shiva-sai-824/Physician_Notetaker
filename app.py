@@ -74,32 +74,66 @@ perform sentiment analysis, and generate SOAP notes for physicians.
 """)
 
 # Initialize session state for models
+def ensure_spacy_model():
+    try:
+        spacy.load("En_core_web_sm")  # Attempt to load the model
+    except OSError:
+        st.warning("SpaCy model 'en_core_web_md' not found. Downloading now...")
+        os.system("python -m spacy download en_core_web_md")  # Install the model
+
+
+# Ensure model is installed at startup
+ensure_spacy_model()
+
+# Streamlit session state initialization
 if 'models_loaded' not in st.session_state:
     st.session_state.models_loaded = False
 
 # Load NLP models in a function to allow for caching and progress indication
+# def load_models():
+#     with st.spinner('Loading NLP models... This may take a minute.'):
+#         progress_bar = st.progress(0)
+        
+#         # Load SpaCy model
+#         try:
+#             progress_bar.progress(10)
+#             st.session_state.spacy_model = spacy.load("en_core_web_md")
+#             progress_bar.progress(50)
+#         except OSError:
+#             st.warning("SpaCy model not found. Downloading now...")
+#             os.system("python -m spacy download en_core_web_md")
+#             st.session_state.spacy_model = spacy.load("en_core_web_md")
+#             progress_bar.progress(50)
+        
+#         # Load Hugging Face sentiment model
+#         progress_bar.progress(60)
+#         st.session_state.sentiment_model = pipeline("sentiment-analysis", model="distilbert-base-uncased")
+#         progress_bar.progress(100)
+        
+#         st.session_state.models_loaded = True
+#         time.sleep(0.5)  # Brief pause to show completed progress
+#         progress_bar.empty()
+#         st.success("Models loaded successfully!")
+
 def load_models():
     with st.spinner('Loading NLP models... This may take a minute.'):
         progress_bar = st.progress(0)
-        
-        # Load SpaCy model
+
+        # Loading SpaCy model
         try:
             progress_bar.progress(10)
             st.session_state.spacy_model = spacy.load("en_core_web_md")
             progress_bar.progress(50)
-        except OSError:
-            st.warning("SpaCy model not found. Downloading now...")
-            os.system("python -m spacy download en_core_web_md")
-            st.session_state.spacy_model = spacy.load("en_core_web_md")
-            progress_bar.progress(50)
-        
+        except Exception as e:
+            st.error(f"Failed to load SpaCy model: {e}")
+
         # Load Hugging Face sentiment model
         progress_bar.progress(60)
         st.session_state.sentiment_model = pipeline("sentiment-analysis", model="distilbert-base-uncased")
         progress_bar.progress(100)
-        
+
         st.session_state.models_loaded = True
-        time.sleep(0.5)  # Brief pause to show completed progress
+        time.sleep(0.5)  # Additional delay before finalizing progress
         progress_bar.empty()
         st.success("Models loaded successfully!")
 
