@@ -1,11 +1,13 @@
 import streamlit as st
 import spacy
 import pandas as pd
-from textblob import TextBlob
-from transformers import pipeline
 import json
 import os
 import time
+from functools import lru_cache
+from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+import psutil
+import gc
 
 # Set page configuration
 st.set_page_config(
@@ -73,104 +75,131 @@ This application analyzes medical conversation transcripts to extract structured
 perform sentiment analysis, and generate SOAP notes for physicians.
 """)
 
+# Initialize configuration in session state
+if 'config' not in st.session_state:
+    st.session_state.config = {
+        'spacy_model': 'en_core_web_sm',  # Use the smaller model by default to save memory
+        'sentiment_model': 'distilbert-base-uncased',
+        'batch_size': 8,  # For processing larger batches
+        'max_text_length': 512  # Limit text length for sentiment analysis
+    }
+
 # Initialize session state for models
-def ensure_spacy_model():
-    try:
-        spacy.load("En_core_web_sm")  # Attempt to load the model
-    except OSError:
-        # st.warning("SpaCy model 'en_core_web_md' not found. Downloading now...")
-        os.system("python -m spacy download en_core_web_md")  # Install the model
-
-
-# Ensure model is installed at startup
-ensure_spacy_model()
-
-# Streamlit session state initialization
 if 'models_loaded' not in st.session_state:
     st.session_state.models_loaded = False
+    st.session_state.spacy_model = None
+    st.session_state.sentiment_model = None
 
-# Load NLP models in a function to allow for caching and progress indication
-# def load_models():
-#     with st.spinner('Loading NLP models... This may take a minute.'):
-#         progress_bar = st.progress(0)
-        
-#         # Load SpaCy model
-#         try:
-#             progress_bar.progress(10)
-#             st.session_state.spacy_model = spacy.load("en_core_web_md")
-#             progress_bar.progress(50)
-#         except OSError:
-#             st.warning("SpaCy model not found. Downloading now...")
-#             os.system("python -m spacy download en_core_web_md")
-#             st.session_state.spacy_model = spacy.load("en_core_web_md")
-#             progress_bar.progress(50)
-        
-#         # Load Hugging Face sentiment model
-#         progress_bar.progress(60)
-#         st.session_state.sentiment_model = pipeline("sentiment-analysis", model="distilbert-base-uncased")
-#         progress_bar.progress(100)
-        
-#         st.session_state.models_loaded = True
-#         time.sleep(0.5)  # Brief pause to show completed progress
-#         progress_bar.empty()
-#         st.success("Models loaded successfully!")
+# Memory monitoring function
+def get_memory_usage():
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    memory_usage_mb = memory_info.rss / 1024 / 1024
+    return memory_usage_mb
+
+# Function to ensure SpaCy model is installed
+@st.cache_resource
+def ensure_spacy_model(model_name):
+    try:
+        return spacy.load(model_name)
+    except OSError:
+        st.warning(f"SpaCy model '{model_name}' not found. Downloading now...")
+        os.system(f"python -m spacy download {model_name}")
+        return spacy.load(model_name)
+
+# Load NLP models with caching
+@st.cache_resource
+def load_sentiment_model(model_name):
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForSequenceClassification.from_pretrained(model_name)
+    return pipeline("sentiment-analysis", model=model, tokenizer=tokenizer)
 
 def load_models():
     with st.spinner('Loading NLP models... This may take a minute.'):
         progress_bar = st.progress(0)
-
-        # Loading SpaCy model
+        
+        # Monitor initial memory usage
+        initial_memory = get_memory_usage()
+        st.info(f"Initial memory usage: {initial_memory:.2f} MB")
+        
         try:
+            # Load SpaCy model
             progress_bar.progress(10)
-            st.session_state.spacy_model = spacy.load("en_core_web_md")
+            st.session_state.spacy_model = ensure_spacy_model(st.session_state.config['spacy_model'])
             progress_bar.progress(50)
+            
+            # Load Hugging Face sentiment model
+            progress_bar.progress(60)
+            st.session_state.sentiment_model = load_sentiment_model(st.session_state.config['sentiment_model'])
+            progress_bar.progress(90)
+            
+            # Force garbage collection
+            gc.collect()
+            
+            current_memory = get_memory_usage()
+            st.info(f"Memory usage after loading models: {current_memory:.2f} MB (Increase: {current_memory - initial_memory:.2f} MB)")
+            
+            st.session_state.models_loaded = True
+            progress_bar.progress(100)
+            time.sleep(0.5)
+            progress_bar.empty()
+            st.success("Models loaded successfully!")
+            
         except Exception as e:
-            st.error(f"Failed to load SpaCy model: {e}")
+            st.error(f"Failed to load models: {e}")
+            st.session_state.models_loaded = False
 
-        # Load Hugging Face sentiment model
-        progress_bar.progress(60)
-        st.session_state.sentiment_model = pipeline("sentiment-analysis", model="distilbert-base-uncased")
-        progress_bar.progress(100)
-
-        st.session_state.models_loaded = True
-        time.sleep(0.5)  # Additional delay before finalizing progress
-        progress_bar.empty()
-        st.success("Models loaded successfully!")
-
-# Extract medical details - adapted from physician_notetaker.ipynb
-def extract_medical_details(transcript_text):
+# Optimized extraction function with LRU cache for repeated texts
+@lru_cache(maxsize=128)
+def extract_medical_details_cached(transcript_text):
+    # Process the document with SpaCy
     doc = st.session_state.spacy_model(transcript_text)
+    
     symptoms = []
     treatments = []
     diagnosis = []
     timeframes = []
 
+    # Extract entities
     for ent in doc.ents:
         if ent.label_ in ["DATE", "TIME"]:
             timeframes.append(ent.text)
 
-    # Manual overrides for transcript based on keyword matching
-    # This approach mimics the manual overrides in your notebook
-    if "pain" in transcript_text.lower() or "discomfort" in transcript_text.lower():
-        symptoms.append("Pain/Discomfort")
-        
-    if "neck" in transcript_text.lower():
-        symptoms.append("Neck pain")
-        
-    if "back" in transcript_text.lower():
-        symptoms.append("Back pain")
-        
-    if "hit my head" in transcript_text.lower():
-        symptoms.append("Head impact")
-        
-    if "physiotherapy" in transcript_text.lower():
-        treatments.append("Physiotherapy sessions")
-        
-    if "painkiller" in transcript_text.lower():
-        treatments.append("Painkillers")
-        
-    if "whiplash" in transcript_text.lower():
-        diagnosis.append("Whiplash injury")
+    # Rule-based extraction using lower-cased text for efficiency
+    text_lower = transcript_text.lower()
+    
+    # Keyword dictionaries for more organized extraction
+    symptom_keywords = {
+        "pain": "Pain/Discomfort",
+        "discomfort": "Pain/Discomfort",
+        "neck pain": "Neck pain",
+        "back pain": "Back pain",
+        "hit my head": "Head impact"
+    }
+    
+    treatment_keywords = {
+        "physiotherapy": "Physiotherapy sessions",
+        "painkiller": "Painkillers"
+    }
+    
+    diagnosis_keywords = {
+        "whiplash": "Whiplash injury"
+    }
+    
+    # Check for symptoms
+    for keyword, symptom in symptom_keywords.items():
+        if keyword in text_lower:
+            symptoms.append(symptom)
+    
+    # Check for treatments
+    for keyword, treatment in treatment_keywords.items():
+        if keyword in text_lower:
+            treatments.append(treatment)
+    
+    # Check for diagnoses
+    for keyword, diag in diagnosis_keywords.items():
+        if keyword in text_lower:
+            diagnosis.append(diag)
 
     return {
         "Symptoms": list(set(symptoms)),
@@ -179,25 +208,34 @@ def extract_medical_details(transcript_text):
         "Timeframes": list(set(timeframes))
     }
 
-# Structured summary - adapted from physician_notetaker.ipynb
+# Non-cached wrapper for the cached function
+def extract_medical_details(transcript_text):
+    # Trim text if it's too long to avoid memory issues
+    if len(transcript_text) > 10000:
+        transcript_text = transcript_text[:10000]
+    return extract_medical_details_cached(transcript_text)
+
+# Structured summary function
 def structured_summary(medical_details, transcript_text):
-    # This function mirrors the structured_summary function from your notebook
-    patient_name = "Unknown"
+    text_lower = transcript_text.lower()
     
-    # Extract patient name
+    # Default values
+    patient_name = "Unknown"
+    current_status = "Unknown"
+    prognosis = "Unknown"
+    
+    # Extract patient name - using simple pattern matching
     if "Ms. Jones" in transcript_text:
         patient_name = "Ms. Jones"
     
-    # Determine current status
-    current_status = "Unknown"
-    if "occasional backache" in transcript_text.lower():
+    # Determine current status with more efficient checks
+    if "occasional backache" in text_lower:
         current_status = "Occasional backache"
-    elif "better" in transcript_text.lower():
+    elif "better" in text_lower:
         current_status = "Improving"
     
     # Determine prognosis
-    prognosis = "Unknown"
-    if "improving" in transcript_text.lower():
+    if "improving" in text_lower:
         prognosis = "Improving, full recovery expected"
     
     return {
@@ -209,9 +247,9 @@ def structured_summary(medical_details, transcript_text):
         "Prognosis": prognosis
     }
 
-# Sentiment & Intent Analysis - adapted from physician_notetaker.ipynb
+# Optimized sentiment analysis
 def analyze_sentiment_and_intent(patient_text):
-    # Extract patient statements
+    # Extract only patient statements to reduce processing
     patient_statements = []
     for line in patient_text.split('\n'):
         if line.strip().startswith("Patient:"):
@@ -219,28 +257,33 @@ def analyze_sentiment_and_intent(patient_text):
     
     patient_combined = " ".join(patient_statements)
     
+    # Limit text length to prevent memory issues
+    if len(patient_combined) > st.session_state.config['max_text_length']:
+        patient_combined = patient_combined[:st.session_state.config['max_text_length']]
+    
     # Sentiment analysis using the transformer model
     classification = st.session_state.sentiment_model(patient_combined)
     raw_label = classification[0]['label']
     
-    # Map raw sentiment label to our desired format
-    if raw_label == 'POSITIVE':
-        sentiment = "Reassured"
-    elif raw_label == 'NEGATIVE':
-        sentiment = "Anxious"
-    else:
-        sentiment = "Neutral"
+    # Map raw sentiment label to desired format
+    sentiment_map = {
+        'POSITIVE': "Reassured",
+        'NEGATIVE': "Anxious",
+        'NEUTRAL': "Neutral"
+    }
+    sentiment = sentiment_map.get(raw_label, "Neutral")
     
-    # Rule-based intent detection from your notebook
+    # Rule-based intent detection - more efficient with a single pass
+    intent = "Providing information"  # Default
     lowered_text = patient_combined.lower()
-    if "worry" in lowered_text or "anxious" in lowered_text or "concern" in lowered_text:
+    
+    # Check for intents in priority order
+    if any(word in lowered_text for word in ["worry", "anxious", "concern"]):
         intent = "Seeking reassurance"
-    elif "better" in lowered_text or "improving" in lowered_text or "helped" in lowered_text:
+    elif any(word in lowered_text for word in ["better", "improving", "helped"]):
         intent = "Reporting improvement"
-    elif "pain" in lowered_text or "symptom" in lowered_text:
+    elif any(word in lowered_text for word in ["pain", "symptom"]):
         intent = "Reporting symptoms"
-    else:
-        intent = "Providing information"
     
     return {
         "Sentiment": sentiment,
@@ -248,32 +291,43 @@ def analyze_sentiment_and_intent(patient_text):
         "Confidence": classification[0]['score']
     }
 
-# SOAP Note Generation - adapted from physician_notetaker.ipynb
+# SOAP Note Generation with more efficient text processing
 def generate_soap_note(summary, transcript_text):
-    # Extract more context for better SOAP note
+    text_lower = transcript_text.lower()
+    
+    # Default values
     history = "Unknown"
-    if "car accident" in transcript_text.lower():
+    physical_exam = "Unknown"
+    assessment = "Unknown"
+    plan = "Unknown"
+    
+    # Extract history information
+    if "car accident" in text_lower:
         history = "Patient involved in a car accident"
         if "September" in transcript_text:
             history += " in September"
     
-    physical_exam = "Unknown"
-    if "physical examination" in transcript_text.lower():
+    # Check for physical examination
+    if "physical examination" in text_lower:
         physical_exam = "Physical examination mentioned, details not provided"
     
-    assessment = "Unknown"
+    # Get assessment from summary
     if summary["Diagnosis"] != "Not specified":
         assessment = summary["Diagnosis"]
     
-    plan = "Unknown"
-    if "physiotherapy" in transcript_text.lower():
-        plan = "Continue physiotherapy"
-    if "painkiller" in transcript_text.lower():
-        plan += ", use painkillers as needed"
+    # Treatment plan components
+    plan_components = []
+    if "physiotherapy" in text_lower:
+        plan_components.append("Continue physiotherapy")
+    if "painkiller" in text_lower:
+        plan_components.append("Use painkillers as needed")
+    
+    if plan_components:
+        plan = ", ".join(plan_components)
     
     return {
         "Subjective": {
-            "Chief_Complaint": ", ".join(summary["Symptoms"]),
+            "Chief_Complaint": ", ".join(summary["Symptoms"]) if summary["Symptoms"] else "Not specified",
             "History_of_Present_Illness": history
         },
         "Objective": {
@@ -282,7 +336,7 @@ def generate_soap_note(summary, transcript_text):
         },
         "Assessment": {
             "Diagnosis": summary["Diagnosis"],
-            "Severity": "Improving based on patient statements"
+            "Severity": "Improving based on patient statements" if "improving" in text_lower else "Unknown"
         },
         "Plan": {
             "Treatment": plan,
@@ -290,14 +344,106 @@ def generate_soap_note(summary, transcript_text):
         }
     }
 
+# Batch processing function with memory optimization
+def process_transcripts_in_batches(transcripts, batch_size=8):
+    results = []
+    total = len(transcripts)
+    
+    for i in range(0, total, batch_size):
+        batch = transcripts[i:i+batch_size]
+        batch_results = []
+        
+        for transcript_data in batch:
+            content = transcript_data["content"]
+            filename = transcript_data["filename"]
+            
+            # Run analysis pipeline
+            medical_details = extract_medical_details(content)
+            summary = structured_summary(medical_details, content)
+            sentiment_analysis = analyze_sentiment_and_intent(content)
+            soap_note = generate_soap_note(summary, content)
+            
+            # Compile results
+            batch_results.append({
+                "filename": filename,
+                "medical_details": medical_details,
+                "summary": summary,
+                "sentiment_analysis": sentiment_analysis,
+                "soap_note": soap_note
+            })
+        
+        # Append batch results and force garbage collection
+        results.extend(batch_results)
+        gc.collect()
+        
+        # Update progress
+        progress = min(1.0, (i + len(batch)) / total)
+        st.progress(progress)
+    
+    return results
+
+# Advanced settings sidebar
+with st.sidebar:
+    st.header("Advanced Settings")
+    
+    st.subheader("Model Configuration")
+    spacy_model_option = st.selectbox(
+        "SpaCy Model",
+        ["en_core_web_sm"],
+        index=0,
+        help="Smaller model uses less memory but may be less accurate"
+    )
+    
+    batch_size = st.slider(
+        "Batch Processing Size",
+        min_value=1,
+        max_value=20,
+        value=8,
+        help="Larger batch sizes process faster but use more memory"
+    )
+    
+    max_text_length = st.slider(
+        "Max Text Length for Analysis",
+        min_value=128,
+        max_value=1024,
+        value=512,
+        help="Limit text length to prevent memory issues"
+    )
+    
+    # Update configuration if changed
+    if (spacy_model_option != st.session_state.config['spacy_model'] or
+        batch_size != st.session_state.config['batch_size'] or
+        max_text_length != st.session_state.config['max_text_length']):
+        
+        st.session_state.config['spacy_model'] = spacy_model_option
+        st.session_state.config['batch_size'] = batch_size
+        st.session_state.config['max_text_length'] = max_text_length
+        
+        # Reset models if SpaCy model changed
+        if spacy_model_option != st.session_state.config['spacy_model']:
+            st.session_state.models_loaded = False
+            st.warning("Model configuration changed. Models will reload on next analysis.")
+    
+    # Memory monitoring
+    if st.button("Check Memory Usage"):
+        memory_usage = get_memory_usage()
+        st.info(f"Current memory usage: {memory_usage:.2f} MB")
+    
+    # Force garbage collection
+    if st.button("Free Memory"):
+        before = get_memory_usage()
+        gc.collect()
+        after = get_memory_usage()
+        st.success(f"Memory freed: {before - after:.2f} MB")
+
 # Main application logic
-tab1, tab2, tab3 = st.tabs(["📋 Transcript Analysis", "📊 Batch Processing", "ℹ️ About"])
+tab1, tab2= st.tabs(["📋 Transcript Analysis", "📊 Batch Processing"])
 
 with tab1:
     # Input section
     st.markdown("<div class='subheader-text'>Input Medical Transcript</div>", unsafe_allow_html=True)
     
-    # Sample transcript option - this is the exact transcript from your notebook
+    # Sample transcript option
     sample_transcript = """
 Physician: Good morning, Ms. Jones. How are you feeling today?
 Patient: Good morning, doctor. I'm doing better, but I still have some discomfort now and then.
@@ -344,7 +490,7 @@ Physician: That's encouraging. Let's go ahead and do a physical examination to c
     
     if analyze_button and transcript:
         with st.spinner('Analyzing transcript...'):
-            # Run the analysis pipeline - this calls the functions that mirror your notebook
+            # Run the analysis pipeline
             medical_details = extract_medical_details(transcript)
             summary = structured_summary(medical_details, transcript)
             sentiment_analysis = analyze_sentiment_and_intent(transcript)
@@ -437,29 +583,15 @@ with tab2:
         
         if process_batch:
             with st.spinner('Processing files...'):
-                results = []
-                
+                # Prepare transcripts for batch processing
+                transcripts = []
                 for uploaded_file in uploaded_files:
-                    # Read file content
                     content = uploaded_file.read().decode("utf-8")
-                    
-                    # Extract filename without extension
                     filename = uploaded_file.name.split('.')[0]
-                    
-                    # Run analysis pipeline (reusing functions from Tab 1)
-                    medical_details = extract_medical_details(content)
-                    summary = structured_summary(medical_details, content)
-                    sentiment_analysis = analyze_sentiment_and_intent(content)
-                    soap_note = generate_soap_note(summary, content)
-                    
-                    # Compile results
-                    results.append({
-                        "filename": filename,
-                        "medical_details": medical_details,
-                        "summary": summary,
-                        "sentiment_analysis": sentiment_analysis,
-                        "soap_note": soap_note
-                    })
+                    transcripts.append({"filename": filename, "content": content})
+                
+                # Process in batches
+                results = process_transcripts_in_batches(transcripts, st.session_state.config['batch_size'])
                 
                 # Display batch results
                 st.success(f"Processed {len(results)} files successfully!")
@@ -482,57 +614,3 @@ with tab2:
                     file_name="batch_analysis_results.json",
                     mime="application/json",
                 )
-
-with tab3:
-    st.markdown("<div class='subheader-text'>About This Application</div>", unsafe_allow_html=True)
-    
-    st.markdown("""
-    ### Medical Transcript Analyzer
-    
-    This application uses Natural Language Processing (NLP) techniques to analyze medical conversation transcripts 
-    and automatically generate structured information that can assist healthcare professionals.
-    
-    #### Features:
-    - **Medical Entity Extraction**: Identifies symptoms, treatments, diagnoses, and timeframes
-    - **Sentiment Analysis**: Determines patient emotional state and communicative intent
-    - **Structured Summarization**: Creates a concise patient summary
-    - **SOAP Note Generation**: Produces a standardized clinical note format
-    
-    #### Technologies Used:
-    - **SpaCy**: For named entity recognition and linguistic analysis
-    - **Transformers (HuggingFace)**: For sentiment analysis
-    - **Streamlit**: For the web application interface
-    
-    #### Methods and Algorithms:
-    - Named Entity Recognition (NER) with rule-based extensions
-    - Transformer-based sentiment classification
-    - Rule-based intent detection
-    - Structured information extraction through pattern matching
-    
-    #### Developed by:
-    Shiva Sai
-    
-    GitHub: [shiva-sai-824](https://github.com/shiva-sai-824)
-    """)
-    
-    # Add a GitHub link button
-    st.markdown("""
-    <div style="display: flex; justify-content: center; margin-top: 2rem;">
-        <a href="https://github.com/shiva-sai-824/Physician_Notetaker" target="_blank" style="text-decoration: none;">
-            <button style="background-color: #333; color: white; padding: 0.5rem 1rem; border-radius: 0.5rem; border: none; display: flex; align-items: center; font-weight: bold;">
-                <svg height="24" width="24" viewBox="0 0 16 16" version="1.1" style="margin-right: 0.5rem;">
-                    <path fill="white" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path>
-                </svg>
-                View Project on GitHub
-            </button>
-        </a>
-    </div>
-    """, unsafe_allow_html=True)
-
-# Add a footer
-st.markdown("""
----
-<div style="text-align: center; color: #666; padding: 1rem;">
-    Medical Transcript Analyzer | Developed for Physician Note-Taking Applications
-</div>
-""", unsafe_allow_html=True)
